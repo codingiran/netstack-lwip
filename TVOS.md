@@ -1,6 +1,11 @@
-# Apple and Windows compatibility branch
+# Apple and Windows compatibility
 
-`feature/tvos` merges both maintained histories:
+`main` is the fork's long-term maintenance and default branch. It includes
+`feature/tvos` through a merge commit, preserving both upstream histories.
+Consumers should pin a full Git revision for reproducible builds. Future
+upstream syncs and platform changes should merge into `main` after verification.
+
+The integrated histories are:
 
 - `Watfaq-legacy/netstack-lwip` patch `d040edd72f3b5d5e8900da1ca332f12850ea3010`
   (Windows port, UDP `local_addr`, original upstream sync through February 2025).
