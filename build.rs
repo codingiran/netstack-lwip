@@ -1,44 +1,7 @@
 use std::{
     env,
     path::{Path, PathBuf},
-    process::Command,
 };
-
-fn sdk_include_path_for(sdk: &str) -> String {
-    let output = Command::new("xcrun")
-        .arg("--sdk")
-        .arg(sdk)
-        .arg("--show-sdk-path")
-        .output()
-        .expect("failed to execute xcrun");
-
-    assert!(output.status.success(), "xcrun could not locate {sdk}");
-
-    let inc_path = Path::new(String::from_utf8_lossy(&output.stdout).trim()).join("usr/include");
-
-    inc_path.to_str().expect("invalid include path").to_string()
-}
-
-fn sdk_include_path() -> Option<String> {
-    let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-    let target = env::var("TARGET").unwrap();
-    match os.as_str() {
-        "ios" => {
-            if target.ends_with("-sim") || target.starts_with("x86_64-") {
-                Some(sdk_include_path_for("iphonesimulator"))
-            } else {
-                Some(sdk_include_path_for("iphoneos"))
-            }
-        }
-        "macos" => Some(sdk_include_path_for("macosx")),
-        "tvos" => Some(sdk_include_path_for(if target.ends_with("-sim") || target.starts_with("x86_64-") {
-            "appletvsimulator"
-        } else {
-            "appletvos"
-        })),
-        _ => None,
-    }
-}
 
 fn compile_lwip() {
     println!("cargo:rerun-if-changed=src/lwip");
@@ -82,55 +45,56 @@ fn compile_lwip() {
         .include("src/lwip/custom")
         .include("src/lwip/include")
         .warnings(false)
-        .flag_if_supported("-Wno-everything");
-    if let Some(sdk_include_path) = sdk_include_path() {
-        build.include(sdk_include_path);
-    }
+        .flag_if_supported("-Wno-everything")
+        // Keep ram_heap (a 2MB tentative definition in mem.c) out of Mach-O
+        // common symbols; ld would otherwise infer a 32KB alignment for it and
+        // warn about exceeding the 16KB segment alignment on Apple Silicon.
+        .flag_if_supported("-fno-common");
     build.debug(true);
     build.compile("liblwip.a");
 }
 
-fn prepare_lwip_bindings() {
-    println!("cargo:rerun-if-changed=src/bindings.rs");
+fn generate_lwip_bindings(out_path: &Path) {
     println!("cargo:rerun-if-changed=src/wrapper.h");
     println!("cargo:include=src/lwip/include");
 
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("bindings.rs");
-    // Preserve the tested upstream bindings unless regeneration is explicitly requested.
-    // Never write generated files into the shared source tree during cross compilation.
-    if env::var_os("BINDINGS_GEN").is_none() && env::var("CARGO_CFG_TARGET_OS").unwrap() != "windows" {
-        std::fs::copy("src/bindings.rs", out_path).expect("failed to copy lwIP bindings");
-        return;
-    }
-
-    let compiler = cc::Build::new().get_compiler();
+    let target = env::var("TARGET").unwrap();
     let mut builder = bindgen::Builder::default()
-        .size_t_is_usize(false)
         .header("src/wrapper.h")
+        // Avoid importing unrelated C runtime symbols from transitive system
+        // headers; keep lwIP declarations and their referenced types.
+        .allowlist_file(r".*[/\\]lwip[/\\](include|custom)[/\\].*")
+        .size_t_is_usize(false)
         .clang_arg("-I./src/lwip/include")
         .clang_arg("-I./src/lwip/custom")
         .clang_arg("-Wno-everything")
         .layout_tests(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
-    // cc-rs supplies the exact Apple target and sysroot, including ARM64 simulators.
+    // Use the same target, deployment version and SDK as the C compilation.
+    // cc-rs resolves tvOS/iOS device and simulator triples, including ARM64
+    // simulators; passing the Rust triple or just usr/include loses that ABI.
     if env::var("CARGO_CFG_TARGET_VENDOR").unwrap() == "apple" {
-        for argument in compiler.args() {
+        for argument in cc::Build::new().get_compiler().args() {
             builder = builder.clang_arg(argument.to_string_lossy());
         }
+    } else {
+        builder = builder.clang_arg(format!("--target={}", target));
     }
     let bindings = builder.generate().expect("Unable to generate bindings");
 
     bindings
-        .write_to_file(out_path)
+        .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
 }
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=BINDINGS_GEN");
-    let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-    if os == "tvos" || os == "ios" || os == "android" || os == "linux" || os == "macos" || os == "windows" {
-        compile_lwip();
+    // Generate bindings for the current target on every build (into OUT_DIR, not
+    // the source tree) so the ABI always matches the target being compiled for.
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    generate_lwip_bindings(&out_path);
+    compile_lwip();
+    if env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" {
+        // sys_win_rand uses the Windows system-preferred cryptographic RNG.
+        println!("cargo:rustc-link-lib=bcrypt");
     }
-
-    prepare_lwip_bindings();
 }

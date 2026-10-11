@@ -5,11 +5,10 @@ mod stack;
 mod tcp_listener;
 mod tcp_stream;
 mod tcp_stream_context;
-mod udp;
+pub mod udp;
 mod util;
 
-pub(crate) static LWIP_MUTEX: mutex::AtomicMutex = mutex::AtomicMutex::new();
-pub(crate) use mutex::AtomicMutexGuard as LWIPMutexGuard;
+pub(crate) static LWIP_MUTEX: mutex::LwipMutex = mutex::LwipMutex::new();
 
 pub use stack::NetStack;
 pub use tcp_listener::TcpListener;
@@ -20,4 +19,6 @@ pub use udp::UdpSocket;
 pub enum Error {
     #[error("LwIP error ({0})")]
     LwIP(i8),
+    #[error("a NetStack instance is already running")]
+    AlreadyRunning,
 }
